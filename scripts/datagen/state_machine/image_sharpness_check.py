@@ -63,6 +63,19 @@ Compression moved the ratio *up* by 18% in the measurements above, so a fall of 
 already points elsewhere; this leaves room for scene-to-scene variation before saying so.
 """
 
+_UNIFORM = 1.0e-6
+"""Below this much neighbour difference a frame carries no image at all.
+
+A recording made without ``--enable_cameras`` still has image-shaped arrays in it, but they are
+filled with a single constant, so every difference is exactly zero. That is worth saying plainly
+rather than dividing by, and it is not a blur -- there was never an image to blur.
+"""
+
+
+def _ratio(horizontal: float, vertical: float) -> float:
+    """Vertical detail as a fraction of horizontal, or NaN where there is no detail to divide by."""
+    return vertical / horizontal if horizontal > _UNIFORM else float("nan")
+
 
 def _to_luma(frame: np.ndarray) -> np.ndarray:
     """Convert a frame to a 0-255 luminance plane, matching ffmpeg's ``gray`` conversion."""
@@ -229,10 +242,25 @@ def main() -> int:
     results = {path: measure(path) for path in args.recordings}
 
     print(f"{'recording':34s} {'camera':18s} {'grad_x':>7s} {'grad_y':>7s} {'ratio':>7s} {'frames':>7s}")
+    blank = []
     for path, cameras in results.items():
         for camera, (horizontal, vertical, count) in cameras.items():
-            ratio = vertical / horizontal if horizontal else float("nan")
-            print(f"{path.name:34s} {camera:18s} {horizontal:7.2f} {vertical:7.2f} {ratio:7.3f} {count:7d}")
+            uniform = horizontal <= _UNIFORM and vertical <= _UNIFORM
+            ratio = "      -" if uniform else f"{_ratio(horizontal, vertical):7.3f}"
+            note = "   <- uniform, no image" if uniform else ""
+            print(f"{path.name:34s} {camera:18s} {horizontal:7.2f} {vertical:7.2f} {ratio} {count:7d}{note}")
+            if uniform:
+                blank.append((path, camera))
+
+    if blank:
+        listed = ", ".join(f"{path.name}:{camera}" for path, camera in blank)
+        print(
+            f"\nEvery pixel is identical in {listed}. That is not a blurred image, it is no image:\n"
+            "the recording holds image-shaped arrays filled with one constant. A run made without\n"
+            "--enable_cameras produces exactly this. Re-record it with cameras enabled before\n"
+            "comparing anything."
+        )
+        return 1
 
     if len(results) < 2:
         print("\nGive a second recording to compare against -- these numbers depend on the scene.")
@@ -250,9 +278,9 @@ def main() -> int:
         for camera, baseline_camera in pairs:
             horizontal, vertical, _ = cameras[camera]
             base_h, base_v, _ = baseline[baseline_camera]
-            base_ratio = base_v / base_h if base_h else float("nan")
-            ratio = vertical / horizontal if horizontal else float("nan")
-            change = ratio / base_ratio if base_ratio else float("nan")
+            base_ratio = _ratio(base_h, base_v)
+            ratio = _ratio(horizontal, vertical)
+            change = ratio / base_ratio
             verdict = "rendering" if change < _RATIO_DROP else "no lopsided loss"
             compared += 1
             suspect = suspect or change < _RATIO_DROP
